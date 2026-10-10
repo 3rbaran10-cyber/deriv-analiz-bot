@@ -43,7 +43,6 @@ SYMBOLS = [
 ]
 SYMBOL_MAP = {kod: isim for isim, kod in SYMBOLS}
 
-# 3 GRAFIK: M30 + M15 + M1 (M5 kaldirildi)
 TF_M30, TF_M15, TF_M1 = 1800, 900, 60
 GRAFIK_MUM_SAYISI = 100
 ATR_PERIOD = 50
@@ -154,7 +153,7 @@ def calculate_atr(candles, period=50):
     return round(medyan, 4)
 
 # ==========================================
-# GRAFIK - 3 TF (M30 | M15 | M1)
+# GRAFIK - 3 TF
 # ==========================================
 _plot_lock = threading.Lock()
 
@@ -226,7 +225,7 @@ def draw_chart_3tf(symbol, isim, fiyat, atr_m30, atr_m15, atr_m1):
         return buf.getvalue()
 
 # ==========================================
-# PROMPT
+# PROMPT (V12 - Donus Bekleme)
 # ==========================================
 PROMPT_TEMPLATE = """Sen dunyanin en iyi {sembol} analiz uzmanisin. 15+ yillik deneyimli profesyonelsin. Smart Money konseptlerini (ICT) derinlemesine bilirsin.
 
@@ -238,41 +237,46 @@ Bu gorsel 3 PARCAYA BOLUNMUS, soldan saga:
   [2] M15 - YESIL cerceveli   - ORTA VADE
   [3] M1  - KIRMIZI cerceveli - GIRIS ZAMANI
 
-Her grafigin USTUNDE numara, rol ve ATR yaziyor.
-
-=== ANALIZ SIRASI ===
-1. M30 -> Ana trend nedir?
-2. M15 -> Orta vade trendi M30'u onayliyor mu?
-3. M1  -> KESIN giris zamani
-
 === CANLI VERILER ===
 - GUNCEL FIYAT: {fiyat}
 - M30 ATR: {atr_m30} puan
 - M15 ATR: {atr_m15} puan
 - M1  ATR: {atr_m1} puan
 
-=== CRASH/BOOM DAVRANISI (COK ONEMLI - OKU) ===
+=== CRASH/BOOM DAVRANISI ===
 
 CRASH endeksleri:
-- YAVAS YAVAS YUKARI surunur (bleed - saatler surebilir)
-- ARADA BIR ANIDEN ASAGI SPIKE atar (sert dusus)
-- Spike ANI ve COK BUYUK olur
-- Bu yuzden: M1 yukari gidiyorsa bu normal (bleed), SPIKE yaklasiyor demektir
-- SHORT icin firsat: Yukari bleed devam ederken SPIKE bekle
-- LONG acma: Spike'in tersine oynamak riskli
+- YAVAS YAVAS YUKARI surunur (bleed)
+- ARADA BIR ANIDEN ASAGI SPIKE atar
+- Bleed saatler surebilir, spike zamani BELLI DEGIL
 
 BOOM endeksleri:
-- YAVAS YAVAS ASAGI surunur (bleed - saatler surebilir)
-- ARADA BIR ANIDEN YUKARI SPIKE atar (sert yukselis)
-- Spike ANI ve COK BUYUK olur
-- Bu yuzden: M1 asagi gidiyorsa bu normal (bleed), SPIKE yaklasiyor demektir
-- LONG icin firsat: Asagi bleed devam ederken SPIKE bekle
-- SHORT acma: Spike'in tersine oynamak riskli
+- YAVAS YAVAS ASAGI surunur (bleed)
+- ARADA BIR ANIDEN YUKARI SPIKE atar
+- Bleed saatler surebilir, spike zamani BELLI DEGIL
 
-ONEMLI:
-- M1 bleed evresinde olabilir, bu NORMAL
-- Trend uyumsuzlugu (M30/M15 yukari, M1 asagi) = spike yaklasiyor OLABILIR
-- Spike ne zaman gelecegi BELLI DEGIL (dakikalar veya saatler)
+=== COK ONEMLI KARAR KURALI ===
+
+SADECE "spike beklentisi" ile islem ACMA. Yani:
+- BOOM icin: "dusuyor ama yakinda spike gelecek" diyerek LONG VERME
+- CRASH icin: "yukseliyor ama yakinda spike gelecek" diyerek SHORT VERME
+
+Bunun yerine DONUS BASLAMIS olmali:
+
+BOOM icin LONG sarti (3'u birlikte olmali):
+1. M1'de dusus DURMUS olmali (son 2-3 mum yatay veya yesil kapanis)
+2. DESTEK bolgesinde tutunma olmali
+3. Yesil mum / hammer / engulfing gibi DONUS sinyali olmali
+Ancak bu 3 sart birlikte saglanirsa LONG ver.
+
+CRASH icin SHORT sarti (3'u birlikte olmali):
+1. M1'de yukselis DURMUS olmali (son 2-3 mum yatay veya kirmizi kapanis)
+2. DIRENC bolgesinde red olmali
+3. Kirmizi mum / shooting star / engulfing gibi DONUS sinyali olmali
+Ancak bu 3 sart birlikte saglanirsa SHORT ver.
+
+Eger donus henuz baslamadiysa -> BEKLE ver.
+"Bleed devam ediyor ama spike yaklasiyor" -> bu BEKLE demektir, islem acma.
 
 === SL/TP NASIL BELIRLEMELISIN ===
 1. Grafiklerdeki destek/direnc/FVG/likidite seviyelerine bak
@@ -282,10 +286,9 @@ ONEMLI:
 5. Risk/odul en az 1:1.3 olsun
 
 === KARAR ===
-- Trend ve yapiyi degerlendir
-- SHORT veya LONG icin mantikli giris noktasi bul
+- Donus BASLAMISSA sinyal ver
+- Donus BASLAMAMISSA (sadece beklenti varsa) -> BEKLE
 - Emin degilsen BEKLE ver
-- Guven %50-95 arasi ver (dusuk guven de olabilir)
 
 === CIKTI FORMATI ===
 SADECE gecerli JSON. Sayilarda NOKTA. Turkce. String giris/stop_loss.
@@ -466,7 +469,7 @@ def gemini_istek_at(url, payload, headers):
         return resp
 
 def analyze_chart(image_bytes, cid, symbol, isim, fiyat, atr_m30, atr_m15, atr_m1):
-    print(f"Analiz: {isim} (V11)", flush=True)
+    print(f"Analiz: {isim} (V12)", flush=True)
     prompt_text = PROMPT_TEMPLATE.format(
         sembol=isim, fiyat=fiyat,
         atr_m30=atr_m30, atr_m15=atr_m15, atr_m1=atr_m1)
@@ -644,11 +647,11 @@ def _menu_keyboard():
     ]}
 
 def _menu_text():
-    return ("🤖 *DERIV ANALIZ BOTU V11*\n\n"
+    return ("🤖 *DERIV ANALIZ BOTU V12*\n\n"
             "🎯 Sembol seç:\n"
             "• M30 + M15 + M1 grafikleri\n"
             "• Gemini 3.1 Pro analizi\n"
-            "• Filtre YOK — Gemini ne derse o\n\n"
+            "• Dönüş bekleme filtresi aktif\n\n"
             "⬇️ Sembol seç:")
 
 def show_menu(cid, mid=None):
@@ -693,13 +696,14 @@ def show_istatistik(cid, mid=None):
     else: send_msg(cid, text, "Markdown", _ana_menu_buton())
 
 def show_yardim(cid, mid=None):
-    text = ("❓ *YARDIM - V11*\n\n"
+    text = ("❓ *YARDIM - V12*\n\n"
             "📊 *3 Zaman Dilimi:*\n"
             "• M30 → ANA TREND\n"
             "• M15 → ORTA VADE\n"
             "• M1  → GIRIS ZAMANI\n\n"
-            "🧠 *Gemini 3.1 Pro* analiz eder\n"
-            "🚫 Filtre YOK — Gemini ne derse o\n\n"
+            "🎯 *Kural:* Dönüş bekleme filtresi aktif\n"
+            "• Sadece 'spike beklentisi' ile sinyal YOK\n"
+            "• Dönüş BAŞLADIKTAN sonra sinyal gelir\n\n"
             "📌 *Crash/Boom Davranışı:*\n"
             "• Crash: Yavaş yukarı → ani aşağı spike\n"
             "• Boom: Yavaş aşağı → ani yukarı spike\n\n"
@@ -800,7 +804,6 @@ def process_analysis(cid, symbol):
     if not a:
         send_msg(cid, "❌ Analiz başarısız."); return
 
-    # Giris = anlik fiyat
     if a.get("yon") in ("LONG", "SHORT"):
         a["giris"] = str(round(fiyat, 4))
 
@@ -826,7 +829,7 @@ def process_analysis(cid, symbol):
 def main():
     threading.Thread(target=run_health_server, daemon=True).start()
     init_db()
-    print(f"=== DERIV BOT V11 BASLADI (ID: {ADMIN_ID}) ===", flush=True)
+    print(f"=== DERIV BOT V12 BASLADI (ID: {ADMIN_ID}) ===", flush=True)
     offset = get_offset()
 
     while True:
