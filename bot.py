@@ -1,5 +1,5 @@
 import os
-import io, json, base64, time, math, requests, threading, re, sqlite3, ssl, warnings
+import io, json, base64, time, requests, threading, sqlite3, ssl, warnings
 from PIL import Image
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -43,15 +43,11 @@ SYMBOLS = [
 ]
 SYMBOL_MAP = {kod: isim for isim, kod in SYMBOLS}
 
-TF_M30, TF_M15, TF_M5, TF_M1 = 1800, 900, 300, 60
+# 3 GRAFIK: M30 + M15 + M1 (M5 kaldirildi)
+TF_M30, TF_M15, TF_M1 = 1800, 900, 60
 GRAFIK_MUM_SAYISI = 100
 ATR_PERIOD = 50
 VARSAYILAN_ATR = 50
-
-ATR_MIN_CARPAN = 1.0
-ATR_MAX_CARPAN = 6.0
-MIN_RR_TP1 = 1.2
-MIN_GUVEN = 70
 
 _ATR_CACHE, _ATR_CACHE_TTL = {}, 60
 _CANDLE_CACHE, _CANDLE_CACHE_TTL = {}, 30
@@ -115,7 +111,7 @@ def deriv_call(payload, timeout=30):
             r = _tek_deneme(endpoint, payload, timeout)
             if r is not None:
                 return r
-        print("❌ Deriv endpoint çalışmadı.", flush=True)
+        print("Deriv endpoint calismadi.", flush=True)
         return None
 
 def get_candles(symbol, granularity, count=100):
@@ -158,109 +154,7 @@ def calculate_atr(candles, period=50):
     return round(medyan, 4)
 
 # ==========================================
-# TREND BELIRLEME
-# ==========================================
-def trend_yonu(candles, son_n=30):
-    if not candles or len(candles) < son_n:
-        return "YATAY"
-    son = candles[-son_n:]
-    yari = len(son) // 2
-    ilk_ort = sum(float(c['close']) for c in son[:yari]) / yari
-    son_ort = sum(float(c['close']) for c in son[yari:]) / (len(son) - yari)
-    fark = son_ort - ilk_ort
-    esik = ilk_ort * 0.0005
-    if fark > esik:
-        return "YUKARI"
-    elif fark < -esik:
-        return "ASAGI"
-    return "YATAY"
-
-# ==========================================
-# BLEED FILTRESI (9/10)
-# ==========================================
-def bleed_kontrol(m1_candles, yon):
-    if not m1_candles or len(m1_candles) < 10:
-        return False, 0
-    son10 = m1_candles[-10:]
-    kapanislar = [float(c['close']) for c in son10]
-    yukari = sum(1 for i in range(1, len(kapanislar)) if kapanislar[i] > kapanislar[i-1])
-    asagi  = sum(1 for i in range(1, len(kapanislar)) if kapanislar[i] < kapanislar[i-1])
-    if yon == "SHORT" and yukari >= 9:
-        return True, yukari
-    if yon == "LONG" and asagi >= 9:
-        return True, asagi
-    return False, 0
-
-# ==========================================
-# LIKIDITE AVI DEDEKTORU
-# ==========================================
-def likidite_avi_kontrol(m1_candles, yon):
-    if not m1_candles or len(m1_candles) < 3:
-        return False, ""
-    son_mum = m1_candles[-1]
-    try:
-        o = float(son_mum['open']); cl = float(son_mum['close'])
-        h = float(son_mum['high']); l = float(son_mum['low'])
-    except:
-        return False, ""
-    boy = h - l
-    if boy <= 0:
-        return False, ""
-    if yon == "SHORT":
-        ust_wick = h - max(o, cl)
-        if ust_wick > boy * 0.6 and cl < o:
-            return True, "Sahte yukari kirilim (uzun ust wick)"
-    if yon == "LONG":
-        alt_wick = min(o, cl) - l
-        if alt_wick > boy * 0.6 and cl > o:
-            return True, "Sahte asagi kirilim (uzun alt wick)"
-    return False, ""
-
-# ==========================================
-# TREND UYUM FILTRESI
-# ==========================================
-def trend_uyum_kontrol(m30_candles, m15_candles, yon):
-    t_m30 = trend_yonu(m30_candles, 30)
-    t_m15 = trend_yonu(m15_candles, 30)
-    if yon == "SHORT":
-        if t_m30 == "YUKARI" and t_m15 == "YUKARI":
-            return False, f"M30/M15 YUKARI, SHORT celisiyor"
-        if t_m30 == "ASAGI" or t_m15 == "ASAGI":
-            return True, f"M30={t_m30}, M15={t_m15}"
-    if yon == "LONG":
-        if t_m30 == "ASAGI" and t_m15 == "ASAGI":
-            return False, f"M30/M15 ASAGI, LONG celisiyor"
-        if t_m30 == "YUKARI" or t_m15 == "YUKARI":
-            return True, f"M30={t_m30}, M15={t_m15}"
-    return True, f"M30={t_m30}, M15={t_m15}"
-
-# ==========================================
-# SPIKE BILGISI
-# ==========================================
-def son_spike_bilgisi(m1_candles, yon):
-    try:
-        if not m1_candles or len(m1_candles) < 20:
-            return "bilinmiyor"
-        son = m1_candles[-100:] if len(m1_candles) >= 100 else m1_candles
-        degisimler = []
-        for c in son:
-            o = float(c['open']); cl = float(c['close'])
-            degisimler.append(cl - o)
-        if yon == "SHORT":
-            idx = degisimler.index(min(degisimler))
-            mesafe = len(son) - 1 - idx
-            buyukluk = abs(min(degisimler))
-            return f"Son buyuk dusus {mesafe} mum once ({round(buyukluk, 2)} puan)."
-        else:
-            idx = degisimler.index(max(degisimler))
-            mesafe = len(son) - 1 - idx
-            buyukluk = max(degisimler)
-            return f"Son buyuk yukselis {mesafe} mum once ({round(buyukluk, 2)} puan)."
-    except:
-        return "bilinmiyor"
-
-# ==========================================
-# GRAFIK
+# GRAFIK - 3 TF (M30 | M15 | M1)
 # ==========================================
 _plot_lock = threading.Lock()
 
@@ -284,29 +178,27 @@ def _ciz_candles(ax, candles):
     ax.set_xlim(-1, len(candles))
     ax.tick_params(labelsize=8)
 
-def draw_chart_4tf(symbol, isim, fiyat, atr_m30, atr_m15, atr_m5, atr_m1):
+def draw_chart_3tf(symbol, isim, fiyat, atr_m30, atr_m15, atr_m1):
     m30 = get_candles(symbol, TF_M30, GRAFIK_MUM_SAYISI)
     m15 = get_candles(symbol, TF_M15, GRAFIK_MUM_SAYISI)
-    m5  = get_candles(symbol, TF_M5,  GRAFIK_MUM_SAYISI)
     m1  = get_candles(symbol, TF_M1,  GRAFIK_MUM_SAYISI)
 
     if not m1:
         return None
 
     with _plot_lock:
-        fig, axes = plt.subplots(1, 4, figsize=(26, 7))
+        fig, axes = plt.subplots(1, 3, figsize=(20, 7))
         fig.patch.set_facecolor('white')
 
         fig.suptitle(
-            f"{isim}   |   FIYAT: {fiyat}   |   M5 ATR (SL/TP): {atr_m5}",
+            f"{isim}   |   FIYAT: {fiyat}   |   M1 ATR: {atr_m1}",
             fontsize=17, fontweight='bold', y=0.985
         )
 
         tf_bilgileri = [
             (axes[0], m30, "1) M30", "ANA TREND",    atr_m30, "#ff7f0e"),
             (axes[1], m15, "2) M15", "ORTA VADE",    atr_m15, "#2ca02c"),
-            (axes[2], m5,  "3) M5",  "KISA VADE",    atr_m5,  "#9467bd"),
-            (axes[3], m1,  "4) M1",  "GIRIS ZAMANI", atr_m1,  "#d62728"),
+            (axes[2], m1,  "3) M1",  "GIRIS ZAMANI", atr_m1,  "#d62728"),
         ]
 
         for ax, candles, numara, rol, atr, renk in tf_bilgileri:
@@ -321,7 +213,7 @@ def draw_chart_4tf(symbol, isim, fiyat, atr_m30, atr_m15, atr_m5, atr_m1):
 
         fig.text(0.5, 0.015,
                  "1 = M30 (Ana Trend)      |      2 = M15 (Orta Vade)      |      "
-                 "3 = M5 (Kisa Vade)      |      4 = M1 (Giris Zamani)",
+                 "3 = M1 (Giris Zamani)",
                  ha='center', fontsize=12, style='italic',
                  color='#222222', fontweight='bold')
 
@@ -334,91 +226,66 @@ def draw_chart_4tf(symbol, isim, fiyat, atr_m30, atr_m15, atr_m5, atr_m1):
         return buf.getvalue()
 
 # ==========================================
-# KIRPMA (SL/TP)
-# ==========================================
-def kirp_sl_tp(symbol, giris, gemini_sl, gemini_tp1, gemini_tp2, atr_m5):
-    try:
-        giris_f = float(str(giris).replace(",", "."))
-        sl_f    = float(str(gemini_sl).replace(",", "."))
-        tp1_f   = float(str(gemini_tp1).replace(",", "."))
-        tp2_f   = float(str(gemini_tp2).replace(",", "."))
-    except: return None
-
-    atr = atr_m5 if atr_m5 and atr_m5 > 0 else 10
-    min_m = atr * ATR_MIN_CARPAN
-    max_m = atr * ATR_MAX_CARPAN
-
-    sl_mesafe  = abs(giris_f - sl_f)
-    tp1_mesafe = abs(giris_f - tp1_f)
-    tp2_mesafe = abs(giris_f - tp2_f)
-
-    if sl_mesafe < min_m:
-        sl_k = min_m
-    elif sl_mesafe > max_m:
-        sl_k = max_m
-    else:
-        sl_k = sl_mesafe
-
-    tp1_min = sl_k * MIN_RR_TP1
-    tp1_k = tp1_mesafe if tp1_mesafe >= tp1_min else tp1_min
-
-    tp2_min = tp1_k * 1.2
-    tp2_k = tp2_mesafe if tp2_mesafe >= tp2_min else tp2_min
-
-    return {"giris": round(giris_f, 4), "atr": atr,
-            "sl_mesafe": round(sl_k, 4),
-            "tp1_mesafe": round(tp1_k, 4),
-            "tp2_mesafe": round(tp2_k, 4)}
-
-# ==========================================
 # PROMPT
 # ==========================================
 PROMPT_TEMPLATE = """Sen dunyanin en iyi {sembol} analiz uzmanisin. 15+ yillik deneyimli profesyonelsin. Smart Money konseptlerini (ICT) derinlemesine bilirsin.
 
 === GORSEL ACIKLAMASI ===
 Sana {sembol} icin TEK bir gorsel gonderiliyor.
-Bu gorsel 4 PARCAYA BOLUNMUS, soldan saga:
+Bu gorsel 3 PARCAYA BOLUNMUS, soldan saga:
 
   [1] M30 - TURUNCU cerceveli - ANA TREND
   [2] M15 - YESIL cerceveli   - ORTA VADE
-  [3] M5  - MOR cerceveli     - KISA VADE
-  [4] M1  - KIRMIZI cerceveli - GIRIS ZAMANI
+  [3] M1  - KIRMIZI cerceveli - GIRIS ZAMANI
 
 Her grafigin USTUNDE numara, rol ve ATR yaziyor.
 
 === ANALIZ SIRASI ===
 1. M30 -> Ana trend nedir?
 2. M15 -> Orta vade trendi M30'u onayliyor mu?
-3. M5  -> Kisa vade yapi
-4. M1  -> KESIN giris zamani
+3. M1  -> KESIN giris zamani
 
 === CANLI VERILER ===
 - GUNCEL FIYAT: {fiyat}
 - M30 ATR: {atr_m30} puan
 - M15 ATR: {atr_m15} puan
-- M5  ATR: {atr_m5} puan (SL/TP guvenlik sinirlari)
 - M1  ATR: {atr_m1} puan
-- SON SPIKE: {spike_bilgi}
+
+=== CRASH/BOOM DAVRANISI (COK ONEMLI - OKU) ===
+
+CRASH endeksleri:
+- YAVAS YAVAS YUKARI surunur (bleed - saatler surebilir)
+- ARADA BIR ANIDEN ASAGI SPIKE atar (sert dusus)
+- Spike ANI ve COK BUYUK olur
+- Bu yuzden: M1 yukari gidiyorsa bu normal (bleed), SPIKE yaklasiyor demektir
+- SHORT icin firsat: Yukari bleed devam ederken SPIKE bekle
+- LONG acma: Spike'in tersine oynamak riskli
+
+BOOM endeksleri:
+- YAVAS YAVAS ASAGI surunur (bleed - saatler surebilir)
+- ARADA BIR ANIDEN YUKARI SPIKE atar (sert yukselis)
+- Spike ANI ve COK BUYUK olur
+- Bu yuzden: M1 asagi gidiyorsa bu normal (bleed), SPIKE yaklasiyor demektir
+- LONG icin firsat: Asagi bleed devam ederken SPIKE bekle
+- SHORT acma: Spike'in tersine oynamak riskli
+
+ONEMLI:
+- M1 bleed evresinde olabilir, bu NORMAL
+- Trend uyumsuzlugu (M30/M15 yukari, M1 asagi) = spike yaklasiyor OLABILIR
+- Spike ne zaman gelecegi BELLI DEGIL (dakikalar veya saatler)
 
 === SL/TP NASIL BELIRLEMELISIN ===
 1. Grafiklerdeki destek/direnc/FVG/likidite seviyelerine bak
 2. SL'yi YAPISAL seviyeye koy (destek alti / direnc ustu)
-3. SL cok dar olmasin: en az 1 x M5 ATR ({min_sl} puan)
-4. SL cok genis olmasin: en fazla 6 x M5 ATR ({max_sl} puan)
-5. TP1 en az SL'nin 1.2 kati (R/R >= 1:1.2)
+3. M1 ATR'yi referans al (cok dar olmasin)
+4. TP1 ve TP2'yi mantikli seviyelere koy
+5. Risk/odul en az 1:1.3 olsun
 
-=== CRASH/BOOM DAVRANISI ===
-- Crash: ani DUSUS spike'lari (asagi) -> SHORT bias
-- Boom: ani YUKSELIS spike'lari (yukari) -> LONG bias
-- BLEED: Crash'te yavas yukari, Boom'da yavas asagi
-- Bleed evresinde pozisyon acma
-- Spike zamanlamasi RASTGELE
-
-=== KARAR KURALLARI ===
-1. M30, M15 celisiyorsa -> BEKLE
-2. Guven %70 altinda -> BEKLE
-3. M1'de bleed varsa -> BEKLE
-4. SL/TP icin YAPISAL seviyeleri kullan
+=== KARAR ===
+- Trend ve yapiyi degerlendir
+- SHORT veya LONG icin mantikli giris noktasi bul
+- Emin degilsen BEKLE ver
+- Guven %50-95 arasi ver (dusuk guven de olabilir)
 
 === CIKTI FORMATI ===
 SADECE gecerli JSON. Sayilarda NOKTA. Turkce. String giris/stop_loss.
@@ -427,7 +294,7 @@ SADECE gecerli JSON. Sayilarda NOKTA. Turkce. String giris/stop_loss.
 - sembol, yon ("LONG"|"SHORT"|"BEKLE"), guven (0-100)
 - giris, stop_loss (string)
 - take_profit (array, 2 eleman)
-- trend_m30, trend_m15, trend_m5, trend_m1
+- trend_m30, trend_m15, trend_m1
 - vwap_durumu, fvg_tespit, likidite_durumu
 - destekler, direncler, formasyonlar, kullanilan_teknikler (array)
 - kisa_analiz, gerekce
@@ -598,16 +465,11 @@ def gemini_istek_at(url, payload, headers):
         SON_ISTEK_ZAMANI[0] = time.time()
         return resp
 
-def analyze_chart(image_bytes, cid, symbol, isim, fiyat,
-                  atr_m30, atr_m15, atr_m5, atr_m1, spike_bilgi):
-    print(f"Analiz: {isim} (V10)", flush=True)
-    min_sl = round(atr_m5 * ATR_MIN_CARPAN, 2)
-    max_sl = round(atr_m5 * ATR_MAX_CARPAN, 2)
+def analyze_chart(image_bytes, cid, symbol, isim, fiyat, atr_m30, atr_m15, atr_m1):
+    print(f"Analiz: {isim} (V11)", flush=True)
     prompt_text = PROMPT_TEMPLATE.format(
         sembol=isim, fiyat=fiyat,
-        atr_m30=atr_m30, atr_m15=atr_m15, atr_m5=atr_m5, atr_m1=atr_m1,
-        spike_bilgi=spike_bilgi,
-        min_sl=min_sl, max_sl=max_sl)
+        atr_m30=atr_m30, atr_m15=atr_m15, atr_m1=atr_m1)
 
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     img.thumbnail((1920, 1920))
@@ -636,7 +498,6 @@ def analyze_chart(image_bytes, cid, symbol, isim, fiyat,
                     "take_profit": {"type": "array", "items": {"type": "string"}},
                     "trend_m30": {"type": "string"},
                     "trend_m15": {"type": "string"},
-                    "trend_m5": {"type": "string"},
                     "trend_m1": {"type": "string"},
                     "vwap_durumu": {"type": "string"},
                     "fvg_tespit": {"type": "string"},
@@ -713,12 +574,11 @@ def json_parse_et(resp, cid):
     if isinstance(a.get("take_profit"), list):
         a["take_profit"] = [temizle_sayi(x) for x in a["take_profit"]]
 
-    try: g = int(a.get("guven", 0))
-    except: g = 0
-    if g < MIN_GUVEN: a["yon"] = "BEKLE"
-
-    try: a["kalan_mum"] = max(1, min(3, int(a.get("kalan_mum", 1))))
-    except: a["kalan_mum"] = 1
+    try:
+        km = int(a.get("kalan_mum", 1))
+        a["kalan_mum"] = max(1, min(3, km))
+    except:
+        a["kalan_mum"] = 1
 
     return a
 
@@ -738,13 +598,11 @@ def build_card(a, isim):
         t.append(f"║  🛑 SL:    {a.get('stop_loss','?')}")
         for i, tp in enumerate(a.get("take_profit", []), 1):
             t.append(f"║  ✅ TP{i}:   {tp}")
-        if a.get("risk_odul"): t.append(f"║  ⚖️ R/R:   {a['risk_odul']}")
     else:
         t.append("║  ⏸️  Sinyal yok")
         if a.get("uyari"): t.append(f"║  ⚠️  {str(a['uyari'])[:38]}")
     t += ["╚══════════════════════════╝", "", "📈 TREND ANALİZİ"]
-    for tf, key in [("M30", "trend_m30"), ("M15", "trend_m15"),
-                    ("M5", "trend_m5"), ("M1", "trend_m1")]:
+    for tf, key in [("M30", "trend_m30"), ("M15", "trend_m15"), ("M1", "trend_m1")]:
         if a.get(key): t.append(f"• {tf}: {a[key]}")
     if a.get("vwap_durumu"): t.append(f"• VWAP: {a['vwap_durumu']}")
     t += ["", "🎯 SEVİYELER",
@@ -786,12 +644,11 @@ def _menu_keyboard():
     ]}
 
 def _menu_text():
-    return ("🤖 *DERIV ANALIZ BOTU V10*\n\n"
-            "🎯 Analiz için sembol seç:\n"
-            "• M30 + M15 + M5 + M1 grafikleri\n"
-            "• M5 ATR ile SL/TP\n"
-            "• Bleed + Likidite + Trend filtreleri\n"
-            "• Gemini 3.1 Pro analizi\n\n"
+    return ("🤖 *DERIV ANALIZ BOTU V11*\n\n"
+            "🎯 Sembol seç:\n"
+            "• M30 + M15 + M1 grafikleri\n"
+            "• Gemini 3.1 Pro analizi\n"
+            "• Filtre YOK — Gemini ne derse o\n\n"
             "⬇️ Sembol seç:")
 
 def show_menu(cid, mid=None):
@@ -836,19 +693,16 @@ def show_istatistik(cid, mid=None):
     else: send_msg(cid, text, "Markdown", _ana_menu_buton())
 
 def show_yardim(cid, mid=None):
-    text = ("❓ *YARDIM - V10*\n\n"
-            "📊 *4 Zaman Dilimi:*\n"
-            "• 1) M30 → ANA TREND\n"
-            "• 2) M15 → ORTA VADE\n"
-            "• 3) M5  → KISA VADE\n"
-            "• 4) M1  → GIRIS ZAMANI\n\n"
-            "🛡️ *Filtreler:*\n"
-            "• Bleed filtresi (9/10)\n"
-            "• Likidite avı dedektörü\n"
-            "• Trend uyum (M30+M15)\n"
-            "• Güven eşiği: %70\n\n"
-            "📏 *SL/TP:* M5 ATR × 1-6\n"
-            "🎯 *TP1:* min SL × 1.2\n\n"
+    text = ("❓ *YARDIM - V11*\n\n"
+            "📊 *3 Zaman Dilimi:*\n"
+            "• M30 → ANA TREND\n"
+            "• M15 → ORTA VADE\n"
+            "• M1  → GIRIS ZAMANI\n\n"
+            "🧠 *Gemini 3.1 Pro* analiz eder\n"
+            "🚫 Filtre YOK — Gemini ne derse o\n\n"
+            "📌 *Crash/Boom Davranışı:*\n"
+            "• Crash: Yavaş yukarı → ani aşağı spike\n"
+            "• Boom: Yavaş aşağı → ani yukarı spike\n\n"
             "⚠️ Yatırım tavsiyesi değildir.")
     if mid: edit_message_text(cid, mid, text, "Markdown", _ana_menu_buton())
     else: send_msg(cid, text, "Markdown", _ana_menu_buton())
@@ -917,7 +771,7 @@ def handle_callback(cq):
 # ==========================================
 def process_analysis(cid, symbol):
     isim = SYMBOL_MAP[symbol]
-    send_msg(cid, f"⏳ *{isim}* analiz ediliyor...\nM30 + M15 + M5 + M1 çekiliyor...", "Markdown")
+    send_msg(cid, f"⏳ *{isim}* analiz ediliyor...\nM30 + M15 + M1 çekiliyor...", "Markdown")
 
     fiyat = get_current_price(symbol)
     if not fiyat:
@@ -926,7 +780,6 @@ def process_analysis(cid, symbol):
 
     m30 = get_candles(symbol, TF_M30, GRAFIK_MUM_SAYISI)
     m15 = get_candles(symbol, TF_M15, GRAFIK_MUM_SAYISI)
-    m5  = get_candles(symbol, TF_M5,  GRAFIK_MUM_SAYISI)
     m1  = get_candles(symbol, TF_M1,  GRAFIK_MUM_SAYISI)
 
     if not m1:
@@ -935,79 +788,21 @@ def process_analysis(cid, symbol):
 
     atr_m30 = calculate_atr(m30, ATR_PERIOD) or VARSAYILAN_ATR
     atr_m15 = calculate_atr(m15, ATR_PERIOD) or VARSAYILAN_ATR
-    atr_m5  = calculate_atr(m5,  ATR_PERIOD) or VARSAYILAN_ATR
     atr_m1  = calculate_atr(m1,  ATR_PERIOD) or VARSAYILAN_ATR
 
-    spike_bilgi = son_spike_bilgisi(m1, "SHORT" if "CRASH" in symbol else "LONG")
-    print(f"{isim} | fiyat={fiyat} | ATR M5={atr_m5}", flush=True)
+    print(f"{isim} | fiyat={fiyat} | ATR M30={atr_m30} M15={atr_m15} M1={atr_m1}", flush=True)
 
-    png = draw_chart_4tf(symbol, isim, fiyat, atr_m30, atr_m15, atr_m5, atr_m1)
+    png = draw_chart_3tf(symbol, isim, fiyat, atr_m30, atr_m15, atr_m1)
     if not png:
         send_msg(cid, f"❌ Grafik çizilemedi."); return
 
-    a = analyze_chart(png, cid, symbol, isim, fiyat,
-                      atr_m30, atr_m15, atr_m5, atr_m1, spike_bilgi)
+    a = analyze_chart(png, cid, symbol, isim, fiyat, atr_m30, atr_m15, atr_m1)
     if not a:
         send_msg(cid, "❌ Analiz başarısız."); return
 
-    # FILTRE 1: BLEED
+    # Giris = anlik fiyat
     if a.get("yon") in ("LONG", "SHORT"):
-        bleed_mi, sayi = bleed_kontrol(m1, a["yon"])
-        if bleed_mi:
-            print(f"FILTRE BLEED: {isim} {a['yon']} -> BEKLE ({sayi}/9)", flush=True)
-            a["yon"] = "BEKLE"
-            a["uyari"] = f"M1 bleed evresinde ({sayi}/9 ters hareket)."
-
-    # FILTRE 2: LIKIDITE AVI
-    if a.get("yon") in ("LONG", "SHORT"):
-        avi_mi, sebep = likidite_avi_kontrol(m1, a["yon"])
-        if avi_mi:
-            print(f"FILTRE LIKIDITE: {isim} {a['yon']} -> BEKLE ({sebep})", flush=True)
-            a["yon"] = "BEKLE"
-            a["uyari"] = f"Likidite avi: {sebep}"
-
-    # FILTRE 3: TREND UYUM
-    if a.get("yon") in ("LONG", "SHORT"):
-        uyum, sebep = trend_uyum_kontrol(m30, m15, a["yon"])
-        if not uyum:
-            print(f"FILTRE TREND: {isim} {a['yon']} -> BEKLE ({sebep})", flush=True)
-            a["yon"] = "BEKLE"
-            a["uyari"] = f"Trend celiski: {sebep}"
-
-    if a.get("yon") in ("LONG", "SHORT"):
-        a["giris"] = str(fiyat)
-        gemini_sl = a.get("stop_loss")
-        tps = a.get("take_profit") or []
-        tp1 = tps[0] if len(tps) > 0 else None
-        tp2 = tps[1] if len(tps) > 1 else None
-
-        if gemini_sl and tp1:
-            if not tp2:
-                try:
-                    g = float(str(fiyat))
-                    t1 = float(str(tp1).replace(",", "."))
-                    tp2 = str(t1 + abs(g - t1) * 0.3) if a["yon"] == "LONG" else str(t1 - abs(g - t1) * 0.3)
-                except: tp2 = tp1
-
-            h = kirp_sl_tp(symbol, fiyat, gemini_sl, tp1, tp2, atr_m5)
-            if h:
-                if a["yon"] == "SHORT":
-                    sl = fiyat + h["sl_mesafe"]
-                    t1 = fiyat - h["tp1_mesafe"]
-                    t2 = fiyat - h["tp2_mesafe"]
-                else:
-                    sl = fiyat - h["sl_mesafe"]
-                    t1 = fiyat + h["tp1_mesafe"]
-                    t2 = fiyat + h["tp2_mesafe"]
-                a["giris"] = str(round(fiyat, 4))
-                a["stop_loss"] = str(round(sl, 4))
-                a["take_profit"] = [str(round(t1, 4)), str(round(t2, 4))]
-                rr = h["tp1_mesafe"] / h["sl_mesafe"] if h["sl_mesafe"] > 0 else 0
-                a["risk_odul"] = f"1:{round(rr, 2)}"
-            else:
-                a["yon"] = "BEKLE"; a["uyari"] = "SL/TP hesaplanamadı."
-        else:
-            a["yon"] = "BEKLE"; a["uyari"] = "SL/TP verisi eksik."
+        a["giris"] = str(round(fiyat, 4))
 
     aid = save_analysis(cid, isim, a)
     kart = build_card(a, isim)
@@ -1031,7 +826,7 @@ def process_analysis(cid, symbol):
 def main():
     threading.Thread(target=run_health_server, daemon=True).start()
     init_db()
-    print(f"=== DERIV BOT V10 BASLADI (ID: {ADMIN_ID}) ===", flush=True)
+    print(f"=== DERIV BOT V11 BASLADI (ID: {ADMIN_ID}) ===", flush=True)
     offset = get_offset()
 
     while True:
