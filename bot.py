@@ -1,5 +1,6 @@
 import os
 import io, json, base64, time, requests, threading, sqlite3, ssl, warnings
+from datetime import datetime
 from PIL import Image
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -33,20 +34,20 @@ DERIV_ENDPOINTS = [
     "wss://api.derivws.com/trading/v1/options/ws/public",
 ]
 
+# 4 SEMBOL
 SYMBOLS = [
-    ("Crash 600 Index",  "CRASH600"),
-    ("Crash 900 Index",  "CRASH900"),
-    ("Crash 1000 Index", "CRASH1000"),
-    ("Boom 600 Index",   "BOOM600"),
-    ("Boom 900 Index",   "BOOM900"),
-    ("Boom 1000 Index",  "BOOM1000"),
+    ("DXY USD",   "frxDXYUSD"),
+    ("SPY.US",    "SPY.US"),
+    ("SDS.US",    "SDS.US"),
+    ("SPXS.US",   "SPXS.US"),
 ]
 SYMBOL_MAP = {kod: isim for isim, kod in SYMBOLS}
 
+# M30 + M15 + M1
 TF_M30, TF_M15, TF_M1 = 1800, 900, 60
 GRAFIK_MUM_SAYISI = 100
-ATR_PERIOD = 50
-VARSAYILAN_ATR = 50
+ATR_PERIOD = 14
+VARSAYILAN_ATR = 0.5
 
 _ATR_CACHE, _ATR_CACHE_TTL = {}, 60
 _CANDLE_CACHE, _CANDLE_CACHE_TTL = {}, 30
@@ -110,7 +111,6 @@ def deriv_call(payload, timeout=30):
             r = _tek_deneme(endpoint, payload, timeout)
             if r is not None:
                 return r
-        print("Deriv endpoint calismadi.", flush=True)
         return None
 
 def get_candles(symbol, granularity, count=100):
@@ -138,7 +138,7 @@ def get_current_price(symbol):
     prices = (resp.get("history") or {}).get("prices") or []
     return float(prices[-1]) if prices else None
 
-def calculate_atr(candles, period=50):
+def calculate_atr(candles, period=14):
     if not candles or len(candles) < 2: return None
     trs = []
     for i in range(1, len(candles)):
@@ -147,13 +147,39 @@ def calculate_atr(candles, period=50):
         trs.append(max(h - l, abs(h - pc), abs(l - pc)))
     if not trs: return None
     n = min(period, len(trs))
-    son = sorted(trs[-n:])
-    mid = len(son) // 2
-    medyan = (son[mid] + son[mid-1]) / 2 if len(son) % 2 == 0 else son[mid]
-    return round(medyan, 4)
+    return round(sum(trs[-n:]) / n, 5)
 
 # ==========================================
-# GRAFIK - 3 TF
+# PIYASA SAATI KONTROLU
+# ==========================================
+def piyasa_acik_mi(symbol):
+    """DXYUSD 7/24'e yakin. ABD ETF'leri sadece borsa saatlerinde."""
+    try:
+        utc_now = datetime.utcnow()
+        wd = utc_now.weekday()  # 0=Pt, 6=Paz
+        hour = utc_now.hour
+        minute = utc_now.minute
+
+        # Hafta sonu kapali
+        if wd == 5:
+            return False
+        if wd == 6:
+            return False
+        if wd == 4 and hour >= 21:  # Cuma 21:00 sonrasi
+            return False
+
+        # ABD ETF'leri: 13:30 - 20:00 UTC (16:30-23:00 TR)
+        if symbol in ("SPY.US", "SDS.US", "SPXS.US"):
+            total_min = hour * 60 + minute
+            if total_min < 13*60+30 or total_min > 20*60:
+                return False
+
+        return True
+    except:
+        return True
+
+# ==========================================
+# GRAFIK - 3 TF (M30 | M15 | M1)
 # ==========================================
 _plot_lock = threading.Lock()
 
@@ -195,8 +221,8 @@ def draw_chart_3tf(symbol, isim, fiyat, atr_m30, atr_m15, atr_m1):
         )
 
         tf_bilgileri = [
-            (axes[0], m30, "1) M30", "ANA TREND",    atr_m30, "#ff7f0e"),
-            (axes[1], m15, "2) M15", "ORTA VADE",    atr_m15, "#2ca02c"),
+            (axes[0], m30, "1) M30", "ANA TREND",    atr_m30, "#1f77b4"),
+            (axes[1], m15, "2) M15", "ORTA VADE",    atr_m15, "#ff7f0e"),
             (axes[2], m1,  "3) M1",  "GIRIS ZAMANI", atr_m1,  "#d62728"),
         ]
 
@@ -225,70 +251,63 @@ def draw_chart_3tf(symbol, isim, fiyat, atr_m30, atr_m15, atr_m1):
         return buf.getvalue()
 
 # ==========================================
-# PROMPT (V12 - Donus Bekleme)
+# PROMPT
 # ==========================================
-PROMPT_TEMPLATE = """Sen dunyanin en iyi {sembol} analiz uzmanisin. 15+ yillik deneyimli profesyonelsin. Smart Money konseptlerini (ICT) derinlemesine bilirsin.
+PROMPT_TEMPLATE = """Sen dunyanin en iyi {sembol} analiz uzmanisin. 15+ yillik deneyimli profesyonelsin. Smart Money (ICT) ve klasik teknik analiz konusunda uzmansin.
 
 === GORSEL ACIKLAMASI ===
 Sana {sembol} icin TEK bir gorsel gonderiliyor.
 Bu gorsel 3 PARCAYA BOLUNMUS, soldan saga:
 
-  [1] M30 - TURUNCU cerceveli - ANA TREND
-  [2] M15 - YESIL cerceveli   - ORTA VADE
+  [1] M30 - MAVI cerceveli    - ANA TREND
+  [2] M15 - TURUNCU cerceveli - ORTA VADE
   [3] M1  - KIRMIZI cerceveli - GIRIS ZAMANI
 
 === CANLI VERILER ===
 - GUNCEL FIYAT: {fiyat}
-- M30 ATR: {atr_m30} puan
-- M15 ATR: {atr_m15} puan
-- M1  ATR: {atr_m1} puan
+- M30 ATR: {atr_m30}
+- M15 ATR: {atr_m15}
+- M1  ATR: {atr_m1}
 
-=== CRASH/BOOM DAVRANISI ===
+=== ENSTRUMAN BILGISI ===
 
-CRASH endeksleri:
-- YAVAS YAVAS YUKARI surunur (bleed)
-- ARADA BIR ANIDEN ASAGI SPIKE atar
-- Bleed saatler surebilir, spike zamani BELLI DEGIL
+DXYUSD = ABD Dolar Endeksi:
+- Dolarin 6 buyuk para birimi karsisindaki degeri
+- Fed faiz kararlari, ABD verileri etkiler
 
-BOOM endeksleri:
-- YAVAS YAVAS ASAGI surunur (bleed)
-- ARADA BIR ANIDEN YUKARI SPIKE atar
-- Bleed saatler surebilir, spike zamani BELLI DEGIL
+SPY.US = S&P 500 ETF (Long):
+- S&P 500 endeksini takip eder
+- Piyasa YUKSELIRSE SPY YUKSELIR
 
-=== COK ONEMLI KARAR KURALI ===
+SDS.US = S&P 500 2x TERS ETF:
+- SPY'nin TERSI hareket eder (2x kaldirac)
+- SPY DUSERSE SDS YUKSELIR
 
-SADECE "spike beklentisi" ile islem ACMA. Yani:
-- BOOM icin: "dusuyor ama yakinda spike gelecek" diyerek LONG VERME
-- CRASH icin: "yukseliyor ama yakinda spike gelecek" diyerek SHORT VERME
+SPXS.US = S&P 500 3x TERS ETF:
+- SPY'nin TERSI hareket eder (3x kaldirac)
+- SPY DUSERSE SPXS YUKSELIR
 
-Bunun yerine DONUS BASLAMIS olmali:
+COK ONEMLI KORELASYON:
+- SPY LONG  = SDS SHORT = SPXS SHORT
+- SPY SHORT = SDS LONG  = SPXS LONG
 
-BOOM icin LONG sarti (3'u birlikte olmali):
-1. M1'de dusus DURMUS olmali (son 2-3 mum yatay veya yesil kapanis)
-2. DESTEK bolgesinde tutunma olmali
-3. Yesil mum / hammer / engulfing gibi DONUS sinyali olmali
-Ancak bu 3 sart birlikte saglanirsa LONG ver.
+=== ANALIZ SIRASI ===
+1. M30 -> Ana trend nedir?
+2. M15 -> Orta vade trendi M30'u onayliyor mu?
+3. M1  -> Giris icin uygun mu?
 
-CRASH icin SHORT sarti (3'u birlikte olmali):
-1. M1'de yukselis DURMUS olmali (son 2-3 mum yatay veya kirmizi kapanis)
-2. DIRENC bolgesinde red olmali
-3. Kirmizi mum / shooting star / engulfing gibi DONUS sinyali olmali
-Ancak bu 3 sart birlikte saglanirsa SHORT ver.
-
-Eger donus henuz baslamadiysa -> BEKLE ver.
-"Bleed devam ediyor ama spike yaklasiyor" -> bu BEKLE demektir, islem acma.
+=== KARAR KURALLARI ===
+1. M30 ve M15 ayni yonde VE M1 giris veriyorsa -> sinyal ver
+2. Celiski varsa -> BEKLE
+3. Trend zayifsa -> BEKLE
+4. Guven %50-95 arasi ver
 
 === SL/TP NASIL BELIRLEMELISIN ===
-1. Grafiklerdeki destek/direnc/FVG/likidite seviyelerine bak
-2. SL'yi YAPISAL seviyeye koy (destek alti / direnc ustu)
-3. M1 ATR'yi referans al (cok dar olmasin)
-4. TP1 ve TP2'yi mantikli seviyelere koy
-5. Risk/odul en az 1:1.3 olsun
-
-=== KARAR ===
-- Donus BASLAMISSA sinyal ver
-- Donus BASLAMAMISSA (sadece beklenti varsa) -> BEKLE
-- Emin degilsen BEKLE ver
+1. SL'yi YAPISAL seviyeye koy (son swing high/low)
+2. M1 ATR'yi referans al (cok dar olmasin)
+3. TP1 ve TP2'yi mantikli seviyelere koy
+4. Risk/odul en az 1:1.3 olsun
+5. Fiyat format: DXY icin 3 hane (102.213), SPY/SDS/SPXS icin 2 hane (778.24)
 
 === CIKTI FORMATI ===
 SADECE gecerli JSON. Sayilarda NOKTA. Turkce. String giris/stop_loss.
@@ -469,7 +488,7 @@ def gemini_istek_at(url, payload, headers):
         return resp
 
 def analyze_chart(image_bytes, cid, symbol, isim, fiyat, atr_m30, atr_m15, atr_m1):
-    print(f"Analiz: {isim} (V12)", flush=True)
+    print(f"Analiz: {isim} (V14)", flush=True)
     prompt_text = PROMPT_TEMPLATE.format(
         sembol=isim, fiyat=fiyat,
         atr_m30=atr_m30, atr_m15=atr_m15, atr_m1=atr_m1)
@@ -635,23 +654,22 @@ def _ana_menu_buton():
 
 def _menu_keyboard():
     return {"inline_keyboard": [
-        [{"text": "🔴 Crash 600", "callback_data": "analiz:CRASH600"},
-         {"text": "🔴 Crash 900", "callback_data": "analiz:CRASH900"},
-         {"text": "🔴 Crash 1000", "callback_data": "analiz:CRASH1000"}],
-        [{"text": "🟢 Boom 600", "callback_data": "analiz:BOOM600"},
-         {"text": "🟢 Boom 900", "callback_data": "analiz:BOOM900"},
-         {"text": "🟢 Boom 1000", "callback_data": "analiz:BOOM1000"}],
+        [{"text": "💵 DXY USD", "callback_data": "analiz:frxDXYUSD"},
+         {"text": "📈 SPY.US",  "callback_data": "analiz:SPY.US"}],
+        [{"text": "📉 SDS.US",  "callback_data": "analiz:SDS.US"},
+         {"text": "📉 SPXS.US", "callback_data": "analiz:SPXS.US"}],
         [{"text": "📜 Geçmiş", "callback_data": "menu:gecmis"},
          {"text": "📊 İstatistik", "callback_data": "menu:istatistik"}],
-        [{"text": "❓ Yardım", "callback_data": "menu:yardim"}]
+        [{"text": "🔧 Debug", "callback_data": "menu:debug"},
+         {"text": "❓ Yardım", "callback_data": "menu:yardim"}]
     ]}
 
 def _menu_text():
-    return ("🤖 *DERIV ANALIZ BOTU V12*\n\n"
+    return ("🤖 *DERIV FOREX BOTU V14*\n\n"
             "🎯 Sembol seç:\n"
             "• M30 + M15 + M1 grafikleri\n"
-            "• Gemini 3.1 Pro analizi\n"
-            "• Dönüş bekleme filtresi aktif\n\n"
+            "• M1 için giriş/SL/TP\n"
+            "• Gemini 3.1 Pro analizi\n\n"
             "⬇️ Sembol seç:")
 
 def show_menu(cid, mid=None):
@@ -696,20 +714,57 @@ def show_istatistik(cid, mid=None):
     else: send_msg(cid, text, "Markdown", _ana_menu_buton())
 
 def show_yardim(cid, mid=None):
-    text = ("❓ *YARDIM - V12*\n\n"
+    text = ("❓ *YARDIM - V14*\n\n"
             "📊 *3 Zaman Dilimi:*\n"
             "• M30 → ANA TREND\n"
             "• M15 → ORTA VADE\n"
             "• M1  → GIRIS ZAMANI\n\n"
-            "🎯 *Kural:* Dönüş bekleme filtresi aktif\n"
-            "• Sadece 'spike beklentisi' ile sinyal YOK\n"
-            "• Dönüş BAŞLADIKTAN sonra sinyal gelir\n\n"
-            "📌 *Crash/Boom Davranışı:*\n"
-            "• Crash: Yavaş yukarı → ani aşağı spike\n"
-            "• Boom: Yavaş aşağı → ani yukarı spike\n\n"
+            "🎯 *Enstrümanlar:*\n"
+            "• DXYUSD → Dolar Endeksi\n"
+            "• SPY.US → S&P 500 Long ETF\n"
+            "• SDS.US → S&P 500 2x Ters\n"
+            "• SPXS.US → S&P 500 3x Ters\n\n"
+            "⚠️ *Piyasa Saatleri:*\n"
+            "• DXYUSD: ~7/24\n"
+            "• SPY/SDS/SPXS: 16:30-23:00 (TSİ)\n"
+            "• Hafta sonu kapalı\n\n"
             "⚠️ Yatırım tavsiyesi değildir.")
     if mid: edit_message_text(cid, mid, text, "Markdown", _ana_menu_buton())
     else: send_msg(cid, text, "Markdown", _ana_menu_buton())
+
+# ==========================================
+# DEBUG
+# ==========================================
+def debug_symbols(cid):
+    send_msg(cid, "🔧 Deriv sembolleri taranıyor... (30 sn)")
+    resp = deriv_call({"active_symbols": "brief", "product_type": "basic", "req_id": 999})
+    if not resp:
+        send_msg(cid, "❌ Deriv bağlantı hatası")
+        return
+    all_s = resp.get("active_symbols", [])
+    lines = [f"📊 Toplam *{len(all_s)}* sembol", ""]
+
+    # Aradığımız kodlar
+    aranan = ["DXY", "SPY", "SDS", "SPXS"]
+    bulunan = {}
+    for s in all_s:
+        kod = s.get("symbol", "")
+        isim = s.get("display_name", "")
+        kod_up = kod.upper()
+        isim_up = isim.upper()
+        for a in aranan:
+            if a in kod_up or a in isim_up:
+                bulunan.setdefault(a, []).append(f"• `{kod}` → {isim}")
+
+    for a in aranan:
+        lines.append(f"🔍 *{a}:*")
+        if a in bulunan:
+            lines.extend(bulunan[a][:5])
+        else:
+            lines.append("❌ Bulunamadı")
+        lines.append("")
+
+    send_msg(cid, "\n".join(lines), "Markdown")
 
 # ==========================================
 # KOMUTLAR
@@ -722,13 +777,15 @@ def handle_command(cid, text):
     if cmd == "/yardim": show_yardim(cid); return
     if cmd == "/gecmis": show_gecmis(cid); return
     if cmd == "/istatistik": show_istatistik(cid); return
+    if cmd == "/debug":
+        threading.Thread(target=debug_symbols, args=(cid,), daemon=True).start(); return
     if cmd == "/analiz":
         p = text.split()
         if len(p) < 2:
-            send_msg(cid, "Kullanım: `/analiz CRASH1000`", "Markdown"); return
-        kod = p[1].upper().replace(" ", "")
+            send_msg(cid, "Kullanım: `/analiz frxDXYUSD`", "Markdown"); return
+        kod = p[1]
         if kod not in SYMBOL_MAP:
-            send_msg(cid, f"❌ Bilinmeyen: `{p[1]}`", "Markdown"); return
+            send_msg(cid, f"❌ Bilinmeyen: `{kod}`", "Markdown"); return
         threading.Thread(target=process_analysis, args=(cid, kod), daemon=True).start()
         return
     send_msg(cid, "ℹ️ /menu yazarak başlayın.")
@@ -749,6 +806,8 @@ def handle_callback(cq):
         if data == "menu:gecmis": show_gecmis(cid, mid); return
         if data == "menu:istatistik": show_istatistik(cid, mid); return
         if data == "menu:yardim": show_yardim(cid, mid); return
+        if data == "menu:debug":
+            threading.Thread(target=debug_symbols, args=(cid,), daemon=True).start(); return
 
         if data.startswith("analiz:"):
             kod = data.split(":", 1)[1]
@@ -775,11 +834,20 @@ def handle_callback(cq):
 # ==========================================
 def process_analysis(cid, symbol):
     isim = SYMBOL_MAP[symbol]
+
+    if not piyasa_acik_mi(symbol):
+        send_msg(cid, f"⚠️ *{isim}* için piyasa şu an kapalı.\n"
+                      f"• DXYUSD: ~7/24\n"
+                      f"• SPY/SDS/SPXS: 16:30-23:00 (TSİ)\n"
+                      f"• Hafta sonu kapalı", "Markdown")
+        return
+
     send_msg(cid, f"⏳ *{isim}* analiz ediliyor...\nM30 + M15 + M1 çekiliyor...", "Markdown")
 
     fiyat = get_current_price(symbol)
     if not fiyat:
-        send_msg(cid, f"❌ {isim} için fiyat alınamadı.")
+        send_msg(cid, f"❌ {isim} için fiyat alınamadı.\n"
+                      f"Sembol kodu yanlış olabilir. `/debug` yaz.", "Markdown")
         return
 
     m30 = get_candles(symbol, TF_M30, GRAFIK_MUM_SAYISI)
@@ -829,7 +897,7 @@ def process_analysis(cid, symbol):
 def main():
     threading.Thread(target=run_health_server, daemon=True).start()
     init_db()
-    print(f"=== DERIV BOT V12 BASLADI (ID: {ADMIN_ID}) ===", flush=True)
+    print(f"=== DERIV FOREX BOTU V14 BASLADI (ID: {ADMIN_ID}) ===", flush=True)
     offset = get_offset()
 
     while True:
